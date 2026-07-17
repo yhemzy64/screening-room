@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The Screening Room</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&family=Fraunces:ital,wght@0,500;0,600;1,500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  body{ font-family:'Inter', sans-serif; }
+  .spin{ animation:spin 1s linear infinite; }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
+  .serif{ font-family:'Fraunces', serif; }
+  .display{ font-family:'Bebas Neue', sans-serif; letter-spacing:0.02em; }
+</style>
+</head>
+<body class="bg-[#141310]">
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useRef, useCallback, useEffect } = React;
+
+// ---- Supabase project config (safe to expose client-side) ----
+const SUPABASE_URL = "https://gaqhhmfpnznyliqwbtzk.supabase.co";
+const SUPABASE_KEY = "sb_publishable_q5rJuj4JOFt_7Of1qnVd0w_a6NT2wkI";
+const BUCKET = "media";
+
+// Change this to whatever you want your admin password to be.
+const ADMIN_PASSWORD = "reel2026";
+
+// ---- Supabase Storage REST helpers (anon key, no login flow) ----
+async function uploadToBucket(fileOrBlob, path, contentType) {
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${encodeURIComponent(path)}`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_KEY, "Content-Type": contentType || fileOrBlob.type || "application/octet-stream" },
+    body: fileOrBlob,
+  });
+  if (!res.ok) { const d = await res.json().catch(()=>({})); throw new Error(d?.message || "Upload failed."); }
+}
+
+async function deleteFromBucket(paths) {
+  await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}`, {
+    method: "DELETE",
+    headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ prefixes: paths }),
+  });
+}
+
+async function listBucket() {
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/list/${BUCKET}`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ prefix: "", limit: 500, sortBy: { column: "created_at", order: "desc" } }),
+  });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+function publicUrl(path) { return `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${encodeURIComponent(path)}`; }
+function guessType(name) {
+  const ext = name.split(".").pop().toLowerCase();
+  return ["mp4","mov","webm","m4v","avi"].includes(ext) ? "video" : "photo";
+}
+
+async function fetchLibrary() {
+  const objects = await listBucket();
+  const metaFiles = (objects || []).filter(o => o.name && o.name.endsWith("__meta.json"));
+  const items = await Promise.all(metaFiles.map(async (o) => {
+    try {
+      const res = await fetch(publicUrl(o.name));
+      const meta = await res.json();
+      return meta;
+    } catch (e) { return null; }
+  }));
+  return items.filter(Boolean).sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+}
+
+async function addItem({ title, creator, year, category, featured, description, mediaFile, thumbFile }, onProgress) {
+  const id = `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+  const mediaExt = mediaFile.name.split(".").pop();
+  const mediaPath = `${id}__media.${mediaExt}`;
+  onProgress && onProgress("Uploading file…");
+  await uploadToBucket(mediaFile, mediaPath);
+
+  let thumbPath = null;
+  if (thumbFile) {
+    const thumbExt = thumbFile.name.split(".").pop();
+    thumbPath = `${id}__thumb.${thumbExt}`;
+    onProgress && onProgress("Uploading thumbnail…");
+    await uploadToBucket(thumbFile, thumbPath);
+  }
+
+  const meta = {
+    id, title, creator: creator || "", year: year || "", category: category || "Movies",
+    featured: !!featured, description: description || "",
+    type: guessType(mediaFile.name), mediaPath, thumbPath, createdAt: Date.now(),
+  };
+  onProgress && onProgress("Saving details…");
+  const metaBlob = new Blob([JSON.stringify(meta)], { type: "application/json" });
+  await uploadToBucket(metaBlob, `${id}__meta.json`, "application/json");
+  return meta;
+}
+
+async function removeItem(item) {
+  const paths = [`${item.id}__meta.json`, item.mediaPath];
+  if (item.thumbPath) paths.push(item.thumbPath);
+  await deleteFromBucket(paths);
+}
+
+function Spinner() { return <span className="inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full spin" />; }
+
+// ---------------- Admin gate ----------------
+function AdminGate({ onUnlock, onBack }) {
+  const [pw, setPw] = useState("");
+  const [error, setError] = useState("");
+  const submit = (e) => {
+    e.preventDefault();
+    if (pw === ADMIN_PASSWORD) onUnlock();
+    else setError("Wrong password.");
+  };
+  return (
+    <div className="min-h-screen bg-[#141310] text-[#EDE6D6] flex items-center justify-center px-6">
+      <div className="max-w-sm w-full text-center">
+        <div className="text-3xl mb-6">🔒</div>
+        <h1 className="serif text-2xl mb-1">Admin Access</h1>
+        <p className="text-xs text-[#A8A08E] uppercase tracking-widest mb-8">The Screening Room</p>
+        <form onSubmit={submit} className="space-y-3">
+          <input value={pw} onChange={(e)=>setPw(e.target.value)} type="password" placeholder="Enter admin password"
+            className="w-full bg-[#1D1B16] border border-[#E3A335]/60 rounded-sm py-3 px-4 text-sm placeholder-[#6B6355] focus:outline-none focus:ring-1 focus:ring-[#E3A335]" />
+          {error && <p className="text-xs text-[#C4685A]">{error}</p>}
+          <button type="submit" className="w-full bg-[#E3A335] hover:bg-[#f0b14a] text-[#141310] font-semibold text-sm rounded-sm py-3">Enter Dashboard</button>
+        </form>
+        <button onClick={onBack} className="text-xs text-[#6B6355] hover:text-[#E3A335] mt-8">← Back to site</button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------- Admin dashboard ----------------
+function AdminDashboard({ items, onBack, onRefresh }) {
+  const [showForm, setShowForm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const [form, setForm] = useState({ title:"", creator:"", year:"", category:"Movies", featured:false, description:"" });
+  const mediaRef = useRef(null);
+  const thumbRef = useRef(null);
+  const [mediaFile, setMediaFile] = useState(null);
+  const [thumbFile, setThumbFile] = useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.title || !mediaFile) { setError("Title and a media file are required."); return; }
+    setSaving(true); setError("");
+    try {
+      await addItem({ ...form, mediaFile, thumbFile }, setStatus);
+      setShowForm(false);
+      setForm({ title:"", creator:"", year:"", category:"Movies", featured:false, description:"" });
+      setMediaFile(null); setThumbFile(null);
+      onRefresh();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false); setStatus("");
+    }
+  };
+
+  const del = async (item) => {
+    if (!confirm(`Delete "${item.title}"?`)) return;
+    await removeItem(item);
+    onRefresh();
+  };
+
+  const featuredCount = items.filter(i => i.featured).length;
+  const categories = new Set(items.map(i => i.category)).size;
+
+  return (
+    <div className="min-h-screen bg-[#141310] text-[#EDE6D6]">
+      <header className="border-b border-[#2A271F] px-6 py-4 flex items-center justify-between">
+        <span className="display text-lg text-[#E3A335]">THE SCREENING ROOM <span className="text-[#6B6355] text-xs align-middle">ADMIN</span></span>
+        <button onClick={onBack} className="text-xs text-[#A8A08E] hover:text-[#E3A335]">View site →</button>
+      </header>
+
+      <main className="max-w-3xl mx-auto px-6 py-8">
+        <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+          <div>
+            <h1 className="serif text-3xl">Admin Dashboard</h1>
+            <p className="text-xs text-[#A8A08E] uppercase tracking-widest">Manage your library</p>
+          </div>
+          <button onClick={()=>setShowForm(true)} className="bg-[#E3A335] hover:bg-[#f0b14a] text-[#141310] text-xs font-semibold rounded-sm px-4 py-2.5">+ Add item</button>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 mb-8">
+          <div className="bg-[#1D1B16] border border-[#2A271F] rounded-sm p-4">
+            <p className="text-xs text-[#A8A08E] uppercase tracking-widest mb-1">Total items</p>
+            <p className="text-3xl serif">{items.length}</p>
+          </div>
+          <div className="bg-[#1D1B16] border border-[#2A271F] rounded-sm p-4">
+            <p className="text-xs text-[#A8A08E] uppercase tracking-widest mb-1">Featured</p>
+            <p className="text-3xl serif">{featuredCount}</p>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          {items.map((item) => (
+            <div key={item.id} className="flex items-center gap-3 bg-[#1D1B16] border border-[#2A271F] rounded-sm p-3">
+              <div className="w-14 h-14 rounded-sm overflow-hidden bg-neutral-900 shrink-0">
+                <img src={publicUrl(item.thumbPath || item.mediaPath)} className="w-full h-full object-cover" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium truncate">{item.title}</p>
+                <p className="text-xs text-[#A8A08E] truncate">{item.creator} {item.featured ? "· Featured" : ""}</p>
+              </div>
+              <button onClick={()=>del(item)} className="text-[#C4685A] text-xs">Delete</button>
+            </div>
+          ))}
+          {items.length === 0 && <p className="text-center text-[#6B6355] text-sm py-10">No items yet — add your first one.</p>}
+        </div>
+      </main>
+
+      {showForm && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center px-4">
+          <div className="bg-[#1D1B16] border border-[#332F26] rounded-sm w-full max-w-lg max-h-[88vh] overflow-y-auto">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[#332F26]">
+              <h2 className="serif text-lg">Add New Item</h2>
+              <button onClick={()=>setShowForm(false)} className="text-[#A8A08E]">✕</button>
+            </div>
+            <form onSubmit={submit} className="p-6 space-y-4">
+              <div>
+                <label className="text-xs text-[#A8A08E] uppercase tracking-widest">Title *</label>
+                <input value={form.title} onChange={(e)=>setForm({...form, title:e.target.value})} className="w-full mt-1 bg-[#141310] border border-[#332F26] rounded-sm py-2.5 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#E3A335]" placeholder="Video title" />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-[#A8A08E] uppercase tracking-widest">Creator</label>
+                  <input value={form.creator} onChange={(e)=>setForm({...form, creator:e.target.value})} className="w-full mt-1 bg-[#141310] border border-[#332F26] rounded-sm py-2.5 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#E3A335]" placeholder="Name" />
+                </div>
+                <div>
+                  <label className="text-xs text-[#A8A08E] uppercase tracking-widest">Year</label>
+                  <input value={form.year} onChange={(e)=>setForm({...form, year:e.target.value})} className="w-full mt-1 bg-[#141310] border border-[#332F26] rounded-sm py-2.5 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#E3A335]" placeholder="2026" />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs text-[#A8A08E] uppercase tracking-widest">Category</label>
+                <select value={form.category} onChange={(e)=>setForm({...form, category:e.target.value})} className="w-full mt-1 bg-[#141310] border border-[#332F26] rounded-sm py-2.5 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#E3A335]">
+                  <option>Movies</option><option>Home Videos</option><option>Photos</option><option>Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-[#A8A08E] uppercase tracking-widest">Description</label>
+                <textarea value={form.description} onChange={(e)=>setForm({...form, description:e.target.value})} rows="2" className="w-full mt-1 bg-[#141310] border border-[#332F26] rounded-sm py-2.5 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#E3A335]" placeholder="Short description..." />
+              </div>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={form.featured} onChange={(e)=>setForm({...form, featured:e.target.checked})} />
+                Featured (shows in the spotlight banner)
+              </label>
+
+              <div>
+                <label className="text-xs text-[#A8A08E] uppercase tracking-widest">Video or photo file *</label>
+                <div onClick={()=>mediaRef.current?.click()} className="mt-1 border border-dashed border-[#4A4436] rounded-sm py-6 flex flex-col items-center justify-center gap-1 cursor-pointer">
+                  <span>🎞️</span>
+                  <span className="text-xs text-[#EDE6D6]">{mediaFile ? mediaFile.name : "Tap to choose from your phone"}</span>
+                  <input ref={mediaRef} type="file" accept="video/*,image/*" className="hidden" onChange={(e)=>setMediaFile(e.target.files[0])} />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs text-[#A8A08E] uppercase tracking-widest">Custom thumbnail (optional)</label>
+                <div onClick={()=>thumbRef.current?.click()} className="mt-1 border border-dashed border-[#4A4436] rounded-sm py-6 flex flex-col items-center justify-center gap-1 cursor-pointer">
+                  <span>🖼️</span>
+                  <span className="text-xs text-[#EDE6D6]">{thumbFile ? thumbFile.name : "Tap to choose an image"}</span>
+                  <input ref={thumbRef} type="file" accept="image/*" className="hidden" onChange={(e)=>setThumbFile(e.target.files[0])} />
+                </div>
+              </div>
+
+              {error && <p className="text-xs text-[#C4685A]">{error}</p>}
+              <button type="submit" disabled={saving} className="w-full bg-[#E3A335] hover:bg-[#f0b14a] disabled:opacity-60 text-[#141310] font-semibold text-sm rounded-sm py-3 flex items-center justify-center gap-2">
+                {saving ? <><Spinner/> {status || "Saving…"}</> : "Publish"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------- Public site ----------------
+function PlayerModal({ item, onClose }) {
+  return (
+    <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center px-4" onClick={onClose}>
+      <button onClick={onClose} className="absolute top-5 right-5 text-[#EDE6D6] text-xl">✕</button>
+      <div className="max-w-3xl w-full" onClick={(e)=>e.stopPropagation()}>
+        {item.type==="video"
+          ? <video src={publicUrl(item.mediaPath)} controls autoPlay className="w-full rounded-sm max-h-[75vh]" />
+          : <img src={publicUrl(item.mediaPath)} alt={item.title} className="w-full rounded-sm max-h-[75vh] object-contain" />}
+        <div className="mt-4">
+          <h3 className="serif text-xl">{item.title}</h3>
+          <p className="text-xs text-[#A8A08E]">{item.creator} {item.year ? `· ${item.year}` : ""} · {item.category}</p>
+          {item.description && <p className="text-sm text-[#A8A08E] mt-2">{item.description}</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Card({ item, onOpen }) {
+  return (
+    <button onClick={()=>onOpen(item)} className="text-left bg-[#1D1B16] border border-[#2A271F] rounded-sm overflow-hidden hover:border-[#E3A335]/50 transition">
+      <div className="relative aspect-video bg-neutral-900">
+        <img src={publicUrl(item.thumbPath || item.mediaPath)} className="absolute inset-0 w-full h-full object-cover" />
+        {item.featured && <span className="absolute top-2 right-2 bg-[#141310]/80 text-[#E3A335] text-[10px] uppercase tracking-widest rounded-sm px-2 py-1">Featured</span>}
+        {item.type==="video" && <span className="absolute top-2 left-2 bg-[#141310]/70 rounded-sm px-1.5 py-1 text-xs">🎞️</span>}
+      </div>
+      <div className="p-3">
+        <h3 className="serif text-sm truncate">{item.title}</h3>
+        <p className="text-[11px] text-[#6B6355] mt-0.5">{item.creator}{item.year ? ` · ${item.year}` : ""}</p>
+      </div>
+    </button>
+  );
+}
+
+function PublicSite({ items, onOpenAdmin }) {
+  const [query, setQuery] = useState("");
+  const [openItem, setOpenItem] = useState(null);
+  const featured = items.find(i => i.featured);
+  const filtered = items.filter(i => i.title.toLowerCase().includes(query.toLowerCase()));
+
+  return (
+    <div className="min-h-screen bg-[#141310] text-[#EDE6D6]">
+      <header className="border-b border-[#2A271F] px-6 py-4 flex items-center justify-between">
+        <span className="display text-lg text-[#E3A335]">THE SCREENING ROOM</span>
+        <button onClick={onOpenAdmin} className="text-xs text-[#6B6355] hover:text-[#E3A335]">Admin</button>
+      </header>
+
+      {featured && (
+        <div className="relative h-[50vh] min-h-[320px] flex items-end p-6" onClick={()=>setOpenItem(featured)}>
+          <img src={publicUrl(featured.thumbPath || featured.mediaPath)} className="absolute inset-0 w-full h-full object-cover" />
+          <div className="absolute inset-0 bg-gradient-to-t from-[#141310] via-[#141310]/60 to-transparent" />
+          <div className="relative z-10 max-w-lg">
+            <span className="text-[10px] uppercase tracking-widest text-[#E3A335] border border-[#E3A335] rounded-sm px-2 py-1">Featured</span>
+            <h1 className="serif text-4xl mt-3 mb-2">{featured.title}</h1>
+            {featured.description && <p className="text-sm text-[#A8A08E] mb-4 line-clamp-2">{featured.description}</p>}
+            <button className="bg-[#E3A335] hover:bg-[#f0b14a] text-[#141310] font-semibold text-sm rounded-sm px-4 py-2.5">▶ Watch now</button>
+          </div>
+        </div>
+      )}
+
+      <main className="max-w-5xl mx-auto px-6 py-8">
+        <input value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="Search videos & photos..."
+          className="w-full bg-[#1D1B16] border border-[#332F26] rounded-sm py-2.5 px-4 text-sm mb-6 focus:outline-none focus:ring-1 focus:ring-[#E3A335]" />
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+          {filtered.map((item) => <Card key={item.id} item={item} onOpen={setOpenItem} />)}
+        </div>
+        {filtered.length === 0 && <p className="text-center text-[#6B6355] text-sm py-16">Nothing here yet.</p>}
+      </main>
+
+      {openItem && <PlayerModal item={openItem} onClose={()=>setOpenItem(null)} />}
+
+      <footer className="border-t border-[#2A271F] py-8 text-center">
+        <a href="mailto:yhemzy64@gmail.com" className="text-xs text-[#6B6355]">yhemzy64@gmail.com</a>
+      </footer>
+    </div>
+  );
+}
+
+function App() {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState("site"); // site | gate | dashboard
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try { setItems(await fetchLibrary()); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  if (loading) return <div className="min-h-screen bg-[#141310] flex items-center justify-center text-[#6B6355] text-sm">Loading…</div>;
+
+  if (view === "gate") return <AdminGate onUnlock={()=>setView("dashboard")} onBack={()=>setView("site")} />;
+  if (view === "dashboard") return <AdminDashboard items={items} onBack={()=>setView("site")} onRefresh={refresh} />;
+  return <PublicSite items={items} onOpenAdmin={()=>setView("gate")} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
